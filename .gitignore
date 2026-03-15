@@ -1,0 +1,12 @@
+# cache
+__pycache__
+
+# dir
+output_train/
+results/
+.idea/
+checkpoints/
+
+# files
+*.md
+requirements.txt
