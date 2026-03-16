@@ -9,10 +9,10 @@ from typing import List
 class DataConfig:
     """Dataset configuration"""
     # Dataset type: 'crack500', 'cfd', 'mcd'
-    dataset_type: str = 'crack500'
+    dataset_type: str = 'cfd'
     
     # Data paths
-    data_root: str = './data'
+    data_root: str = '/mnt/d/dev/data'
     train_images: str = 'train/image'
     train_masks: str = 'train/mask'
     val_images: str = 'validation/image'
@@ -80,7 +80,7 @@ class TrainConfig:
     
     # Scheduler
     scheduler: str = 'cosine'
-    warmup_epochs: int = 5
+    warmup_epochs: int = 10
     min_lr: float = 1e-6
     
     # Loss weights

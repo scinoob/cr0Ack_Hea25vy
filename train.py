@@ -7,7 +7,6 @@ import sys
 import argparse
 import time
 import torch
-import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 
 # ============================================================================
@@ -24,11 +23,10 @@ from config import get_config, update_config_from_args
 from models import build_model
 from datasets import get_dataloader
 from utils import (
-    SegmentationMetrics, CombinedLoss, set_seed, setup_logger, 
+    SegmentationMetrics, CombinedLoss, set_seed, setup_logger,
     AverageMeter, LRScheduler, save_checkpoint, load_checkpoint,
-    get_optimizer, count_parameters, format_time, get_metrics_table,get_current_time
+    get_optimizer, count_parameters, format_time, get_metrics_table, get_current_time
 )
-
 
 # ============================================================================
 # 改动日期: 2026-03-14
@@ -53,12 +51,12 @@ def register_gradient_hooks(model):
     改动作者: @kimi
     """
     global gradient_hooks
-    
+
     # 清除旧的钩子
     for hook in gradient_hooks:
         hook.remove()
     gradient_hooks = []
-    
+
     # 定义钩子回调函数
     def make_hook(name):
         def hook_fn(module, grad_input, grad_output):
@@ -71,32 +69,33 @@ def register_gradient_hooks(model):
                     # grad_max = grad.abs().max().item()
                     # grad_std = grad.std().item()
                     grad_norm = grad.norm(2).item()
-                    
+
                     if name not in gradient_stats:
-                        gradient_stats[name] = {'mean': [], 'max': [], 'std': [],'norm':[]}
-                    
+                        gradient_stats[name] = {'mean': [], 'max': [], 'std': [], 'norm': []}
+
                     # gradient_stats[name]['mean'].append(grad_mean)
                     # gradient_stats[name]['max'].append(grad_max)
                     # gradient_stats[name]['std'].append(grad_std)
                     gradient_stats[name]['norm'].append(grad_norm)
+
         return hook_fn
-    
+
     # 注册 CNN branch1-4 的梯度钩子 (监控 blocks 的输出梯度)
     for i in range(4):
         stage = model.cnn_branch.stages[i]
         # 在 CNNStage 的 blocks 上注册钩子
-        name = f'CNN_Branch_{i+1}'
+        name = f'CNN_Branch_{i + 1}'
         handle = stage.blocks.register_full_backward_hook(make_hook(name))
         gradient_hooks.append(handle)
-    
+
     # 注册 MiT Block1-4 的梯度钩子 (监控每个 stage 的 blocks)
     for i in range(4):
         stage = model.mit_branch.stages[i]
         # 在 MiTStage 的 blocks ModuleList 上注册钩子
-        name = f'MiT_Block_{i+1}'
+        name = f'MiT_Block_{i + 1}'
         handle = stage.blocks.register_full_backward_hook(make_hook(name))
         gradient_hooks.append(handle)
-    
+
     # 注册 Decoder DSAM 的梯度钩子
     decoder_dsams = [
         ('Decoder_DSAM_4', model.decoder.decoder4.dsam),
@@ -107,7 +106,7 @@ def register_gradient_hooks(model):
     for name, module in decoder_dsams:
         handle = module.register_full_backward_hook(make_hook(name))
         gradient_hooks.append(handle)
-    
+
     return len(gradient_hooks)
 
 
@@ -120,10 +119,10 @@ def log_gradient_stats(writer, epoch):
     改动作者: @kimi
     """
     global gradient_stats
-    
+
     if writer is None or len(gradient_stats) == 0:
         return
-    
+
     # 对每个模块记录平均梯度统计
     for name, stats in gradient_stats.items():
         if len(stats['norm']) > 0:
@@ -131,14 +130,25 @@ def log_gradient_stats(writer, epoch):
             # avg_max = sum(stats['max']) / len(stats['max'])
             # avg_std = sum(stats['std']) / len(stats['std'])
             avg_norm = sum(stats['norm']) / len(stats['norm'])
-            
+
             # writer.add_scalar(f'Gradient/{name}/mean', avg_mean, epoch)
             # writer.add_scalar(f'Gradient/{name}/max', avg_max, epoch)
             # writer.add_scalar(f'Gradient/{name}/std', avg_std, epoch)
             writer.add_scalar(f'Gradient/{name}/norm', avg_norm, epoch)
-    
+
     # 清空统计信息，为下一个周期做准备
     gradient_stats = {}
+
+
+# gemini计算裁剪后的梯度
+def get_module_grad_norm(module):
+    """计算某个具体模块当前的梯度范数"""
+    total_norm = 0.0
+    for p in module.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.detach().data.norm(2)
+            total_norm += param_norm.item() ** 2
+    return total_norm ** 0.5
 
 
 # ============================================================================
@@ -163,48 +173,85 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logg
         metrics: Dictionary of evaluation metrics
     """
     model.train()
-    
+
     # Meters
     loss_meter = AverageMeter('Loss')
     loss_main_meter = AverageMeter('Loss_Main')
     loss_boundary_meter = AverageMeter('Loss_Boundary')
     loss_aux_meter = AverageMeter('Loss_Aux')
-    
+
     # Metrics
     metrics = SegmentationMetrics()
-    
+
+    # 【新增】：用于在 Epoch 内累加裁剪后的真实梯度范数
+    clipped_grad_norms = {
+        'CNN_Branch_1': 0.0,
+        'CNN_Branch_2': 0.0,
+        'CNN_Branch_3': 0.0,
+        'CNN_Branch_4': 0.0,
+
+        'MiT_Branch_1': 0.0,
+        'MiT_Branch_2': 0.0,
+        'MiT_Branch_3': 0.0,
+        'MiT_Branch_4': 0.0,
+
+        'Decoder_DSAM_4': 0.0,
+        'Decoder_DSAM_3': 0.0,
+        'Decoder_DSAM_2': 0.0,
+        'Decoder_DSAM_1': 0.0,
+    }
     start_time = time.time()
-    
+
     for batch_idx, (images, masks, _) in enumerate(dataloader):
         # Move to device
         images = images.to(device)
         masks = masks.to(device)
-        step = images.shape[0]
-        
+
         # Forward pass
         pred_main, pred_boundary, pred_aux = model(images)
-        
+
         # Calculate loss
         loss, loss_dict = criterion(pred_main, pred_boundary, pred_aux, masks)
-        
+
         # Backward pass
         optimizer.zero_grad()
         loss.backward()
+
+        # 加入梯度裁剪，将最大梯度范数限制为 1.0 (或 2.0)
+        # 这一步可以防止浅层网络因为跳跃连接接收到过大的梯度而崩溃
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+
+        # 【新增】：累加当前 Batch 裁剪后的真实梯度
+        clipped_grad_norms['CNN_Branch_1'] += get_module_grad_norm(model.cnn_branch.stages[0].blocks)
+        clipped_grad_norms['CNN_Branch_2'] += get_module_grad_norm(model.cnn_branch.stages[1].blocks)
+        clipped_grad_norms['CNN_Branch_3'] += get_module_grad_norm(model.cnn_branch.stages[2].blocks)
+        clipped_grad_norms['CNN_Branch_4'] += get_module_grad_norm(model.cnn_branch.stages[3].blocks)
+
+        clipped_grad_norms['MiT_Branch_1'] += get_module_grad_norm(model.mit_branch.stages[0].blocks)
+        clipped_grad_norms['MiT_Branch_2'] += get_module_grad_norm(model.mit_branch.stages[1].blocks)
+        clipped_grad_norms['MiT_Branch_3'] += get_module_grad_norm(model.mit_branch.stages[2].blocks)
+        clipped_grad_norms['MiT_Branch_4'] += get_module_grad_norm(model.mit_branch.stages[3].blocks)
+
+        clipped_grad_norms['Decoder_DSAM_1'] += get_module_grad_norm(model.decoder.decoder1.dsam)
+        clipped_grad_norms['Decoder_DSAM_2'] += get_module_grad_norm(model.decoder.decoder2.dsam)
+        clipped_grad_norms['Decoder_DSAM_3'] += get_module_grad_norm(model.decoder.decoder3.dsam)
+        clipped_grad_norms['Decoder_DSAM_4'] += get_module_grad_norm(model.decoder.decoder4.dsam)
+
         optimizer.step()
-        
+
         # Update meters
         loss_meter.update(loss.item(), images.size(0))
         loss_main_meter.update(loss_dict['main'], images.size(0))
         loss_boundary_meter.update(loss_dict['boundary'], images.size(0))
         loss_aux_meter.update(loss_dict['aux'], images.size(0))
-        
+
         # Update metrics
         metrics.update(pred_main.detach(), masks.detach())
-        
+
         # Log batch progress
         if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(dataloader):
             logger.info(
-                f'Epoch [{epoch}][{batch_idx+1}/{len(dataloader)}] '
+                f'Epoch [{epoch}][{batch_idx + 1}/{len(dataloader)}] '
                 f'Loss: {loss_meter.avg:.4f} '
                 f'(Main: {loss_main_meter.avg:.4f}, '
                 f'Boundary: {loss_boundary_meter.avg:.4f}, '
@@ -217,20 +264,20 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logg
             # ============================================================================
             # 添加图片到tensorboard
             if writer is not None:
-                writer.add_image('train/image',images[1],epoch)
-                writer.add_image('train/pred',pred_main[1],epoch)
-                writer.add_image('train/gt',masks[1],epoch)
-    
+                writer.add_image('train/image', images[1], epoch)
+                writer.add_image('train/pred', pred_main[1], epoch)
+                writer.add_image('train/gt', masks[1], epoch)
+
     # Get metrics results
     metrics_results = metrics.get_results()
-    
+
     # Log epoch summary
     elapsed_time = time.time() - start_time
     logger.info(f'Epoch [{epoch}] Training Summary:')
     logger.info(f'  Time: {format_time(elapsed_time)}')
     logger.info(f'  Loss: {loss_meter.avg:.4f}')
     logger.info(get_metrics_table(metrics_results, title='Training Metrics'))
-    
+
     # TensorBoard logging
     if writer:
         writer.add_scalar('Train/Loss', loss_meter.avg, epoch)
@@ -241,8 +288,93 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logg
         writer.add_scalar('Train/Recall', metrics_results['recall'], epoch)
         writer.add_scalar('Train/F1_Score', metrics_results['f1_score'], epoch)
         writer.add_scalar('Train/mIoU', metrics_results['miou'], epoch)
-    
+
+        # 记录裁剪后的梯度变化
+        writer.add_scalar('Clipped_Grad/CNN_Branch_1', clipped_grad_norms['CNN_Branch_1'] / len(dataloader), epoch)
+        writer.add_scalar('Clipped_Grad/CNN_Branch_2', clipped_grad_norms['CNN_Branch_2'] / len(dataloader), epoch)
+        writer.add_scalar('Clipped_Grad/CNN_Branch_3', clipped_grad_norms['CNN_Branch_3'] / len(dataloader), epoch)
+        writer.add_scalar('Clipped_Grad/CNN_Branch_4', clipped_grad_norms['CNN_Branch_4'] / len(dataloader), epoch)
+
+        writer.add_scalar('Clipped_Grad/MiT_Branch_1', clipped_grad_norms['MiT_Branch_1'] / len(dataloader), epoch)
+        writer.add_scalar('Clipped_Grad/MiT_Branch_2', clipped_grad_norms['MiT_Branch_2'] / len(dataloader), epoch)
+        writer.add_scalar('Clipped_Grad/MiT_Branch_3', clipped_grad_norms['MiT_Branch_3'] / len(dataloader), epoch)
+        writer.add_scalar('Clipped_Grad/MiT_Branch_4', clipped_grad_norms['MiT_Branch_4'] / len(dataloader), epoch)
+
+        writer.add_scalar('Clipped_Grad/Decoder_DSAM_4', clipped_grad_norms['Decoder_DSAM_4'] / len(dataloader), epoch)
+        writer.add_scalar('Clipped_Grad/Decoder_DSAM_3', clipped_grad_norms['Decoder_DSAM_3'] / len(dataloader), epoch)
+        writer.add_scalar('Clipped_Grad/Decoder_DSAM_2', clipped_grad_norms['Decoder_DSAM_2'] / len(dataloader), epoch)
+        writer.add_scalar('Clipped_Grad/Decoder_DSAM_1', clipped_grad_norms['Decoder_DSAM_1'] / len(dataloader), epoch)
+
     return loss_meter.avg, metrics_results
+
+
+@torch.no_grad()
+def validate_with_dyn_threshold(model, dataloader, criterion, device, epoch, logger, writer=None):
+    model.eval()
+
+    loss_meter = AverageMeter('Loss')
+    loss_main_meter = AverageMeter('Loss_Main')
+    loss_boundary_meter = AverageMeter('Loss_Boundary')
+    loss_aux_meter = AverageMeter('Loss_Aux')
+
+    # 【新增】：定义要扫描的动态阈值列表
+    thresholds = [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6]
+    # 为每个阈值实例化一个独立的 Metrics 计算器
+    metrics_dict = {t: SegmentationMetrics(threshold=t) for t in thresholds}
+
+    start_time = time.time()
+
+    for batch_idx, (images, masks, _) in enumerate(dataloader):
+        images = images.to(device)
+        masks = masks.to(device)
+
+        pred_main, pred_boundary, pred_aux = model(images)
+        loss, loss_dict = criterion(pred_main, pred_boundary, pred_aux, masks)
+
+        loss_meter.update(loss.item(), images.size(0))
+        loss_main_meter.update(loss_dict['main'], images.size(0))
+        loss_boundary_meter.update(loss_dict['boundary'], images.size(0))
+        loss_aux_meter.update(loss_dict['aux'], images.size(0))
+
+        # 【修改】：遍历所有阈值，传入同一个预测概率图进行分别统计
+        for t in thresholds:
+            metrics_dict[t].update(pred_main, masks)
+
+    # 【新增】：寻找验证集上 F1-Score 最高的阈值
+    best_t = 0.5
+    best_f1 = 0.0
+    best_metrics_results = None
+
+    logger.info(f"\n--- Dynamic Thresholding Analysis (Epoch {epoch}) ---")
+    for t in thresholds:
+        res = metrics_dict[t].get_results()
+        logger.info(
+            f"Threshold {t:.2f} | F1: {res['f1_score']:.4f} | Recall: {res['recall']:.4f} | Precision: {res['precision']:.4f} | mIoU: {res['miou']:.4f}")
+
+        if res['f1_score'] > best_f1:
+            best_f1 = res['f1_score']
+            best_t = t
+            best_metrics_results = res
+
+    elapsed_time = time.time() - start_time
+    logger.info(f'Epoch [{epoch}] Validation Summary:')
+    logger.info(f'  Time: {format_time(elapsed_time)}')
+    logger.info(f'  Loss: {loss_meter.avg:.4f}')
+    logger.info(f'  ★ Optimal Threshold found at: {best_t:.2f} (F1={best_f1:.4f})')
+    logger.info(get_metrics_table(best_metrics_results, title=f'Best Val Metrics (Thresh={best_t:.2f})'))
+
+    if writer:
+        writer.add_scalar('Val/Loss', loss_meter.avg, epoch)
+        writer.add_scalar('Val/Loss_Main', loss_main_meter.avg, epoch)
+        # 记录最优阈值及其对应的指标
+        writer.add_scalar('Val/Optimal_Threshold', best_t, epoch)
+        writer.add_scalar('Val/Precision', best_metrics_results['precision'], epoch)
+        writer.add_scalar('Val/Recall', best_metrics_results['recall'], epoch)
+        writer.add_scalar('Val/F1_Score', best_f1, epoch)
+        writer.add_scalar('Val/mIoU', best_metrics_results['miou'], epoch)
+
+    # 返回最优的指标，驱动模型保存机制
+    return loss_meter.avg, best_metrics_results
 
 
 @torch.no_grad()
@@ -263,48 +395,48 @@ def validate(model, dataloader, criterion, device, epoch, logger, writer=None):
         metrics: Dictionary of evaluation metrics
     """
     model.eval()
-    
+
     # Meters
     loss_meter = AverageMeter('Loss')
     loss_main_meter = AverageMeter('Loss_Main')
     loss_boundary_meter = AverageMeter('Loss_Boundary')
     loss_aux_meter = AverageMeter('Loss_Aux')
-    
+
     # Metrics
     metrics = SegmentationMetrics()
-    
+
     start_time = time.time()
-    
+
     for batch_idx, (images, masks, _) in enumerate(dataloader):
         # Move to device
         images = images.to(device)
         masks = masks.to(device)
-        
+
         # Forward pass
         pred_main, pred_boundary, pred_aux = model(images)
-        
+
         # Calculate loss
         loss, loss_dict = criterion(pred_main, pred_boundary, pred_aux, masks)
-        
+
         # Update meters
         loss_meter.update(loss.item(), images.size(0))
         loss_main_meter.update(loss_dict['main'], images.size(0))
         loss_boundary_meter.update(loss_dict['boundary'], images.size(0))
         loss_aux_meter.update(loss_dict['aux'], images.size(0))
-        
+
         # Update metrics
         metrics.update(pred_main, masks)
-    
+
     # Get metrics results
     metrics_results = metrics.get_results()
-    
+
     # Log validation summary
     elapsed_time = time.time() - start_time
     logger.info(f'Epoch [{epoch}] Validation Summary:')
     logger.info(f'  Time: {format_time(elapsed_time)}')
     logger.info(f'  Loss: {loss_meter.avg:.4f}')
     logger.info(get_metrics_table(metrics_results, title='Validation Metrics'))
-    
+
     # TensorBoard logging
     if writer:
         writer.add_scalar('Val/Loss', loss_meter.avg, epoch)
@@ -315,19 +447,19 @@ def validate(model, dataloader, criterion, device, epoch, logger, writer=None):
         writer.add_scalar('Val/Recall', metrics_results['recall'], epoch)
         writer.add_scalar('Val/F1_Score', metrics_results['f1_score'], epoch)
         writer.add_scalar('Val/mIoU', metrics_results['miou'], epoch)
-    
+
     return loss_meter.avg, metrics_results
 
 
 def main():
     """Main training function"""
-    
+
     # Parse arguments
     parser = argparse.ArgumentParser(description='Train Crack Segmentation Network')
-    parser.add_argument('--dataset_type', type=str, default='cfd', 
+    parser.add_argument('--dataset_type', type=str, default='cfd',
                         choices=['crack500', 'cfd', 'mcd'],
                         help='Dataset type')
-    parser.add_argument('--data_root', type=str, default='./data/CFD',
+    parser.add_argument('--data_root', type=str, default='/mnt/d/dev/data/CFD',
                         help='Root directory of dataset')
     parser.add_argument('--batch_size', type=int, default=8,
                         help='Batch size')
@@ -356,11 +488,11 @@ def main():
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
     args = parser.parse_args()
-    
+
     # Get configuration
     config = get_config()
     config = update_config_from_args(config, args)
-    
+
     # ============================================================================
     # 改动日期: 2026-03-14
     # 改动作者: @kimi
@@ -372,24 +504,24 @@ def main():
     # ============================================================================
     # 生成日期时间字符串 (格式: 年-月-日-时-分)
     timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M')
-    
+
     # 创建主输出目录: output_train/日期时间/
     output_base_dir = os.path.join(args.output_dir, f"{args.dataset_type}_{timestamp}")
-    
+
     # 创建子目录
     checkpoint_dir = os.path.join(output_base_dir, 'checkpoints')
     log_dir = os.path.join(output_base_dir, 'logs')
     tensorboard_dir = os.path.join(log_dir, 'log')
-    
+
     # 创建所有目录
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(tensorboard_dir, exist_ok=True)
-    
+
     # 更新配置中的路径
     config.train.checkpoint_dir = checkpoint_dir
     config.train.log_dir = log_dir
-    
+
     # 旧的代码:
     # # Set random seed
     # set_seed(config.seed)
@@ -398,18 +530,18 @@ def main():
     # log_file = os.path.join(config.train.log_dir, f"train_{get_current_time}.log")
     # logger = setup_logger('CrackSegmentation', log_file)
     # ============================================================================
-    
+
     # Set random seed
     set_seed(config.seed)
-    
+
     # Setup logger
     log_file = os.path.join(config.train.log_dir, 'train.log')
     logger = setup_logger('CrackSegmentation', log_file)
-    
-    logger.info('='*60)
+
+    logger.info('=' * 60)
     logger.info('Crack Segmentation Network - Training')
-    logger.info('='*60)
-    
+    logger.info('=' * 60)
+
     # ============================================================================
     # 改动日期: 2026-03-14
     # 改动作者: @kimi
@@ -420,24 +552,24 @@ def main():
     logger.info(f'  Checkpoints:    {checkpoint_dir}')
     logger.info(f'  Logs:           {log_dir}')
     logger.info(f'  TensorBoard:    {tensorboard_dir}')
-    logger.info('='*60)
-    
+    logger.info('=' * 60)
+
     # Device
     device = torch.device(config.train.device if torch.cuda.is_available() else 'cpu')
     logger.info(f'Device: {device}')
-    
+
     # Create dataloaders
     logger.info('Creating dataloaders...')
     train_loader = get_dataloader(config.data, split='train')
     val_loader = get_dataloader(config.data, split='val')
     logger.info(f'Train samples: {len(train_loader.dataset)}')
     logger.info(f'Val samples: {len(val_loader.dataset)}')
-    
+
     # Create model
     logger.info('Creating model...')
     model = build_model(config.model)
     model = model.to(device)
-    
+
     # ============================================================================
     # 改动日期: 2026-03-14
     # 改动作者: @kimi
@@ -452,16 +584,16 @@ def main():
     # logger.info(f'Total parameters: {total_params:,}')
     # logger.info(f'Trainable parameters: {trainable_params:,}')
     # ============================================================================
-    
+
     # Count parameters
     total_params, trainable_params = count_parameters(model)
     logger.info(f'Total parameters: {total_params:,}')
     logger.info(f'Trainable parameters: {trainable_params:,}')
-    
+
     # Create optimizer
     optimizer = get_optimizer(model, config.train)
     logger.info(f'Optimizer: {config.train.optimizer}, LR: {config.train.lr}')
-    
+
     # Create scheduler
     scheduler = LRScheduler(
         optimizer,
@@ -471,13 +603,13 @@ def main():
         base_lr=config.train.lr,
         min_lr=config.train.min_lr
     )
-    
+
     # Create criterion
     criterion = CombinedLoss(
         lambda_boundary=config.train.lambda_boundary,
         lambda_aux=config.train.lambda_aux
     )
-    
+
     # ============================================================================
     # 改动日期: 2026-03-14
     # 改动作者: @kimi
@@ -492,7 +624,7 @@ def main():
     writer = None
     if config.train.use_tensorboard:
         writer = SummaryWriter(tensorboard_dir)
-    
+
     # Resume from checkpoint
     start_epoch = 0
     best_f1 = 0.0
@@ -501,31 +633,34 @@ def main():
         start_epoch, best_f1 = load_checkpoint(config.train.resume, model, optimizer, device)
         start_epoch += 1
         logger.info(f'Resumed from epoch {start_epoch}, best F1: {best_f1:.4f}')
-    
+
     # Training loop
-    logger.info('='*60)
+    logger.info('=' * 60)
     logger.info('Starting training...')
-    logger.info('='*60)
-    
+    logger.info('=' * 60)
+
     for epoch in range(start_epoch, config.train.epochs):
-        logger.info(f'\n{"="*60}')
-        logger.info(f'Epoch {epoch+1}/{config.train.epochs}')
+        logger.info(f'\n{"=" * 60}')
+        logger.info(f'Epoch {epoch + 1}/{config.train.epochs}')
         logger.info(f'Learning rate: {scheduler.get_lr():.6f}')
-        logger.info(f'{"="*60}')
-        
+        logger.info(f'{"=" * 60}')
+
         # Train
         train_loss, train_metrics = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch+1, logger, writer
+            model, train_loader, criterion, optimizer, device, epoch + 1, logger, writer
         )
-        
+
         # Validate
-        val_loss, val_metrics = validate(
-            model, val_loader, criterion, device, epoch+1, logger, writer
+        # val_loss, val_metrics = validate(
+        #     model, val_loader, criterion, device, epoch + 1, logger, writer
+        # )
+        val_loss, val_metrics = validate_with_dyn_threshold(
+            model, val_loader, criterion, device, epoch + 1, logger, writer
         )
-        
+
         # Update learning rate
-        scheduler.step(epoch+1)
-        
+        scheduler.step(epoch + 1)
+
         # ============================================================================
         # 改动日期: 2026-03-14
         # 改动作者: @kimi
@@ -543,12 +678,12 @@ def main():
         # 
         # if (epoch + 1) % config.train.save_interval == 0 or is_best:
         # ============================================================================
-        
+
         # Save checkpoint
         is_best = val_metrics['f1_score'] > best_f1
         if is_best:
             best_f1 = val_metrics['f1_score']
-        
+
         if (epoch + 1) % config.train.save_interval == 0 or is_best:
             checkpoint = {
                 'epoch': epoch,
@@ -561,20 +696,20 @@ def main():
             save_checkpoint(
                 checkpoint,
                 config.train.checkpoint_dir,
-                filename=f'checkpoint_epoch_{epoch+1}.pth',
+                filename=f'checkpoint_epoch_{epoch + 1}.pth',
                 is_best=is_best
             )
-        
+
         logger.info(f'\nBest F1-Score so far: {best_f1:.4f}')
-    
+
     # Close TensorBoard writer
     if writer:
         writer.close()
-    
-    logger.info('='*60)
+
+    logger.info('=' * 60)
     logger.info('Training completed!')
     logger.info(f'Best F1-Score: {best_f1:.4f}')
-    logger.info('='*60)
+    logger.info('=' * 60)
 
 
 if __name__ == '__main__':

@@ -31,8 +31,8 @@ class CrackSegmentationNetwork(nn.Module):
     3. Decoder: Multi-scale feature fusion with 4 decoder stages
     4. Output: Main (512x512) + Boundary (128x128) + Auxiliary (8x8) predictions
     """
-    
-    def __init__(self, 
+
+    def __init__(self,
                  stem_in_channels=3,
                  stem_out_channels=64,
                  mit_embed_dims=[64, 128, 256, 512],
@@ -45,10 +45,10 @@ class CrackSegmentationNetwork(nn.Module):
                  cnn_channels=[64, 128, 256, 512],
                  decoder_channels=[256, 128, 64, 32]):
         super(CrackSegmentationNetwork, self).__init__()
-        
+
         # Stem module
         self.stem = StemModule(stem_in_channels, stem_out_channels)
-        
+
         # MiT Branch
         self.mit_branch = MiTBranch(
             in_channels=stem_out_channels,
@@ -60,29 +60,29 @@ class CrackSegmentationNetwork(nn.Module):
             drop_rate=mit_drop_rate,
             drop_path_rate=mit_drop_path_rate
         )
-        
+
         # CNN Branch
         self.cnn_branch = CNNBranch(
             in_channels=stem_out_channels,
             channels=cnn_channels,
             num_blocks=2
         )
-        
+
         # LEDIM fusion modules for each stage
         self.ledim_modules = nn.ModuleList([
             LEDIM(channels=mit_embed_dims[i])
             for i in range(len(mit_embed_dims))
         ])
-        
+
         # Decoder
         self.decoder = Decoder(
             encoder_channels=mit_embed_dims,
             decoder_channels=decoder_channels
         )
-        
+
         # Initialize weights
         self._init_weights()
-        
+
     def _init_weights(self):
         """Initialize network weights"""
         for m in self.modules():
@@ -95,7 +95,7 @@ class CrackSegmentationNetwork(nn.Module):
                 nn.init.normal_(m.weight, std=0.01)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-    
+
     def forward(self, x):
         """
         Args:
@@ -106,12 +106,13 @@ class CrackSegmentationNetwork(nn.Module):
             aux_out: Auxiliary prediction (B, 1, H/32, W/32)
         """
         # Stem
-        x_stem = self.stem(x)  # (B, 64, H/4, W/4)
-        
+        # x_stem = self.stem(x)  # (B, 64, H/4, W/4)
+        x_half, x_stem = self.stem(x)  # x_half: 256x256, x_stem: 128x128
+
         # Get features from both branches
         mit_features = self.mit_branch(x_stem)  # List of [F1, F2, F3, F4]
         cnn_features = self.cnn_branch(x_stem)  # List of [F1, F2, F3, F4]
-        
+
         # LEDIM fusion for each stage
         fused_features = []
         for i in range(len(mit_features)):
@@ -120,8 +121,8 @@ class CrackSegmentationNetwork(nn.Module):
 
         # 修改：额外传入 cnn_features[0] 作为最浅层的跳跃连接特征
         # Decoder (pass stem features as additional skip connection)
-        main_out, boundary_out, aux_out = self.decoder(fused_features, x_stem,cnn_features[0])
-        
+        main_out, boundary_out, aux_out = self.decoder(fused_features, x_stem, x_half)
+
         return main_out, boundary_out, aux_out
 
 
@@ -159,6 +160,7 @@ def init_weights(m):
         nn.init.constant_(m.weight, 1)
         nn.init.constant_(m.bias, 0)
 
+
 if __name__ == '__main__':
     # Test the model
     model = CrackSegmentationNetwork()
@@ -168,7 +170,7 @@ if __name__ == '__main__':
     print(f"Main output shape: {main_out.shape}")
     print(f"Boundary output shape: {boundary_out.shape}")
     print(f"Auxiliary output shape: {aux_out.shape}")
-    
+
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

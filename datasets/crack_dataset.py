@@ -34,7 +34,7 @@ class CrackDataset(Dataset):
                  vertical_flip=True,
                  rotation=True,
                  brightness_jitter=0.1,
-                 use_clahe=True  # 新增参数控制是否使用 CLAHE
+                 use_clahe=False  # 新增参数控制是否使用 CLAHE
                  ):
         """
         Args:
@@ -59,7 +59,9 @@ class CrackDataset(Dataset):
         self.brightness_jitter = brightness_jitter
         self.use_clahe = use_clahe and (split == 'train')  # 建议仅在训练时使用，或者全部使用
         # 初始化 CLAHE 算法实例
-        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        self.clahe = None
+        if self.use_clahe:
+            self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
         # Get image and mask paths
         self.image_paths, self.mask_paths = self._get_paths()
@@ -123,12 +125,12 @@ class CrackDataset(Dataset):
                     if self.split == 'val':
                         # Validation: image has _label suffix, mask doesn't
                         base_name = img_name.replace('_label.jpg', '').replace('_label.png', '').replace('.jpg', '')
-                        mask_name = base_name + '_label.png'
+                        mask_name = base_name + '_label.PNG'
                     else:
                         # Train and test: mask has _label suffix
                         base_name = img_name.replace('.jpg', '').replace('.png', '')
                         # base_name = img_name.replace('.jpg', '')
-                        mask_name = base_name + '_label.png'
+                        mask_name = base_name + '_label.PNG'
 
                     mask_path = os.path.join(mask_dir, mask_name)
                     image_paths.append(img_path)

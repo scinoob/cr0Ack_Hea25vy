@@ -65,12 +65,12 @@ class DecoderBlock(nn.Module):
 
         # @kimi: Old code - Sub-pixel convolution for upsampling
         # self.upsample = SubPixelConv(in_channels, out_channels, scale_factor)
-        
+
         # @kimi: New code - Bilinear interpolation upsampling with channel adjustment
         self.upsample = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
+            # nn.BatchNorm2d(out_channels),
+            # nn.ReLU(inplace=True)
         )
 
         # 3x3 conv for feature refinement after concatenation
@@ -95,7 +95,7 @@ class DecoderBlock(nn.Module):
         """
         # @kimi: Old code - Sub-pixel convolution upsampling
         # x = self.upsample(x)
-        
+
         # @kimi: New code - Bilinear interpolation upsampling
         x = self.upsample(x)
         x = F.interpolate(x, scale_factor=self.scale_factor, mode='bilinear', align_corners=False)
@@ -118,29 +118,46 @@ class SegmentationHead(nn.Module):
     
     Modified by @kimi: Replace sub-pixel convolution with bilinear interpolation
     Uses bilinear interpolation to upsample to original resolution.
+    优化：修复单通道 BN 导致的灰度问题，并引入二阶段上采样融合 1/2 尺度特征
     """
 
-    def __init__(self, in_channels, skip_channels, out_channels=1, scale_factor=4):
+    def __init__(self, in_channels, skip_channels, out_channels=1):
         super().__init__()
 
-        self.scale_factor = scale_factor
+        # self.scale_factor = scale_factor
+        # 第一阶段：将 1/4 尺度的特征 (128x128) 上采样到 1/2 尺度 (256x256)
+        self.up_to_half = nn.Sequential(
+            nn.Conv2d(in_channels, skip_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(skip_channels),
+            nn.ReLU(inplace=True)
+        )
 
         # 新增：用于融合跳跃连接特征的 3x3 卷积
+        # self.fuse_conv = nn.Sequential(
+        #     nn.Conv2d(in_channels + skip_channels, in_channels, kernel_size=3, padding=1, bias=False),
+        #     nn.BatchNorm2d(in_channels),
+        #     nn.ReLU(inplace=True)
+        # )
+
+        # 融合 1/2 尺度的跳跃连接特征
         self.fuse_conv = nn.Sequential(
-            nn.Conv2d(in_channels + skip_channels, in_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(in_channels),
+            nn.Conv2d(skip_channels * 2, skip_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(skip_channels),
             nn.ReLU(inplace=True)
         )
 
         # @kimi: Old code - Sub-pixel convolution
         # self.upsample = SubPixelConv(in_channels, out_channels, scale_factor)
-        
+
         # @kimi: New code - Bilinear interpolation upsampling with channel adjustment
-        self.upsample = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
+        # self.upsample = nn.Sequential(
+        #     nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+        #     nn.BatchNorm2d(out_channels),
+        #     nn.ReLU(inplace=True)
+        # )
+
+        # 第二阶段：输出层，绝对不能用 BN 和 ReLU！直接用带 bias 的卷积
+        self.upsample = nn.Conv2d(skip_channels, out_channels, kernel_size=1, bias=True)
 
         # Sigmoid activation
         self.sigmoid = nn.Sigmoid()
@@ -152,20 +169,21 @@ class SegmentationHead(nn.Module):
         Returns:
             Output tensor (B, 1, H*scale, W*scale)
         """
-        # 没有用上浅层的跳跃连接，以后修
-        # if skip_feat is not None:
-        #     x = torch.cat([x, skip_feat], dim=1)
-        #     x = self.fuse_conv(x)
+        # x: (B, C, 128, 128) -> up_x: (B, skip_channels, 256, 256)
+        x = self.up_to_half(x)
+        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
 
-        # x = self.fuse_conv(x)
-        
-        # @kimi: Old code - Sub-pixel convolution upsampling
-        # x = self.upsample(x)
-        
-        # @kimi: New code - Bilinear interpolation upsampling
+        # 融合 Stem 传来的 1/2 尺度特征
+        if skip_feat is not None:
+            x = torch.cat([x, skip_feat], dim=1)
+            x = self.fuse_conv(x)
+
+        # 最后的输出卷积
         x = self.upsample(x)
-        x = F.interpolate(x, scale_factor=self.scale_factor, mode='bilinear', align_corners=False)
-        
+
+        # 最终上采样到原图尺度 (512x512)
+        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+
         x = self.sigmoid(x)
         return x
 
@@ -270,9 +288,8 @@ class Decoder(nn.Module):
         # Segmentation head
         self.seg_head = SegmentationHead(
             in_channels=decoder_channels[3],
-            skip_channels=encoder_channels[0],
+            skip_channels=32,
             out_channels=1,
-            scale_factor=4
         )
 
         # Boundary head (at 1/4 resolution = 128x128)
@@ -319,9 +336,9 @@ class Decoder(nn.Module):
         # Boundary prediction at 1/4 resolution (128x128)
         boundary_out = self.boundary_head(d1)
         # 修改：将浅层 CNN 特征传入 seg_head
+        # Main segmentation output: 32 x 128 x 128 -> 1 x 512 x 512
         main_out = self.seg_head(d1, shallow_cnn_feat)
 
-        # Main segmentation output: 32 x 128 x 128 -> 1 x 512 x 512
-        main_out = self.seg_head(d1)
+        # main_out = self.seg_head(d1)
 
         return main_out, boundary_out, aux_out
