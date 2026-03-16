@@ -67,16 +67,18 @@ def register_gradient_hooks(model):
                 grad = grad_output[0]
                 if grad is not None:
                     # 计算梯度统计信息
-                    grad_mean = grad.abs().mean().item()
-                    grad_max = grad.abs().max().item()
-                    grad_std = grad.std().item()
+                    # grad_mean = grad.abs().mean().item()
+                    # grad_max = grad.abs().max().item()
+                    # grad_std = grad.std().item()
+                    grad_norm = grad.norm(2).item()
                     
                     if name not in gradient_stats:
-                        gradient_stats[name] = {'mean': [], 'max': [], 'std': []}
+                        gradient_stats[name] = {'mean': [], 'max': [], 'std': [],'norm':[]}
                     
-                    gradient_stats[name]['mean'].append(grad_mean)
-                    gradient_stats[name]['max'].append(grad_max)
-                    gradient_stats[name]['std'].append(grad_std)
+                    # gradient_stats[name]['mean'].append(grad_mean)
+                    # gradient_stats[name]['max'].append(grad_max)
+                    # gradient_stats[name]['std'].append(grad_std)
+                    gradient_stats[name]['norm'].append(grad_norm)
         return hook_fn
     
     # 注册 CNN branch1-4 的梯度钩子 (监控 blocks 的输出梯度)
@@ -124,14 +126,16 @@ def log_gradient_stats(writer, epoch):
     
     # 对每个模块记录平均梯度统计
     for name, stats in gradient_stats.items():
-        if len(stats['mean']) > 0:
-            avg_mean = sum(stats['mean']) / len(stats['mean'])
-            avg_max = sum(stats['max']) / len(stats['max'])
-            avg_std = sum(stats['std']) / len(stats['std'])
+        if len(stats['norm']) > 0:
+            # avg_mean = sum(stats['mean']) / len(stats['mean'])
+            # avg_max = sum(stats['max']) / len(stats['max'])
+            # avg_std = sum(stats['std']) / len(stats['std'])
+            avg_norm = sum(stats['norm']) / len(stats['norm'])
             
-            writer.add_scalar(f'Gradient/{name}/mean', avg_mean, epoch)
-            writer.add_scalar(f'Gradient/{name}/max', avg_max, epoch)
-            writer.add_scalar(f'Gradient/{name}/std', avg_std, epoch)
+            # writer.add_scalar(f'Gradient/{name}/mean', avg_mean, epoch)
+            # writer.add_scalar(f'Gradient/{name}/max', avg_max, epoch)
+            # writer.add_scalar(f'Gradient/{name}/std', avg_std, epoch)
+            writer.add_scalar(f'Gradient/{name}/norm', avg_norm, epoch)
     
     # 清空统计信息，为下一个周期做准备
     gradient_stats = {}
@@ -320,10 +324,10 @@ def main():
     
     # Parse arguments
     parser = argparse.ArgumentParser(description='Train Crack Segmentation Network')
-    parser.add_argument('--dataset_type', type=str, default='crack500', 
+    parser.add_argument('--dataset_type', type=str, default='cfd', 
                         choices=['crack500', 'cfd', 'mcd'],
                         help='Dataset type')
-    parser.add_argument('--data_root', type=str, default='./data/crack500',
+    parser.add_argument('--data_root', type=str, default='./data/CFD',
                         help='Root directory of dataset')
     parser.add_argument('--batch_size', type=int, default=8,
                         help='Batch size')

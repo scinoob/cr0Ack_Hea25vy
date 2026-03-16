@@ -117,9 +117,10 @@ class CrackSegmentationNetwork(nn.Module):
         for i in range(len(mit_features)):
             fused = self.ledim_modules[i](cnn_features[i], mit_features[i])
             fused_features.append(fused)
-        
+
+        # 修改：额外传入 cnn_features[0] 作为最浅层的跳跃连接特征
         # Decoder (pass stem features as additional skip connection)
-        main_out, boundary_out, aux_out = self.decoder(fused_features, x_stem)
+        main_out, boundary_out, aux_out = self.decoder(fused_features, x_stem,cnn_features[0])
         
         return main_out, boundary_out, aux_out
 

@@ -5,6 +5,7 @@ Crack Segmentation Dataset
 import os
 import sys
 
+import cv2
 import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
@@ -32,7 +33,9 @@ class CrackDataset(Dataset):
                  horizontal_flip=True,
                  vertical_flip=True,
                  rotation=True,
-                 brightness_jitter=0.1):
+                 brightness_jitter=0.1,
+                 use_clahe=True  # 新增参数控制是否使用 CLAHE
+                 ):
         """
         Args:
             data_root: Root directory of the dataset
@@ -54,6 +57,9 @@ class CrackDataset(Dataset):
         self.vertical_flip = vertical_flip
         self.rotation = rotation
         self.brightness_jitter = brightness_jitter
+        self.use_clahe = use_clahe and (split == 'train')  # 建议仅在训练时使用，或者全部使用
+        # 初始化 CLAHE 算法实例
+        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
         # Get image and mask paths
         self.image_paths, self.mask_paths = self._get_paths()
@@ -177,6 +183,23 @@ class CrackDataset(Dataset):
 
         return image, mask
 
+    # 新增 CLAHE 处理函数
+    def _apply_clahe(self, image_pil):
+        # 转换 PIL 到 OpenCV (RGB)
+        img_cv = np.array(image_pil)
+        # 转换到 LAB 颜色空间分离亮度通道
+        lab = cv2.cvtColor(img_cv, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+
+        # 仅对 L (亮度) 通道应用局部直方图均衡化
+        cl = self.clahe.apply(l)
+
+        # 合并通道并转回 RGB
+        limg = cv2.merge((cl, a, b))
+        img_clahe = cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
+
+        return Image.fromarray(img_clahe)
+
     def __len__(self):
         return len(self.image_paths)
 
@@ -193,6 +216,10 @@ class CrackDataset(Dataset):
         # Load image and mask
         image = Image.open(img_path).convert('RGB')
         mask = Image.open(mask_path).convert('L')
+
+        # 新增：在进行ToTensor等张量转换前，应用 CLAHE
+        if self.use_clahe:
+            image = self._apply_clahe(image)
 
         # Apply transforms
         image = self.image_transform(image)
@@ -266,5 +293,6 @@ if __name__ == "__main__":
     img, mask, meta = single
     print(img)
     from matplotlib import pyplot as plt
+
     plt.imshow(img.squeeze(0).numpy().transpose(1, 2, 0))
     plt.show()
