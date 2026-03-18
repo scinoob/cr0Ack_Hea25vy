@@ -17,7 +17,7 @@ class LocalVariance(nn.Module):
     """
 
     def __init__(self, kernel_size=7):
-        super(LocalVariance, self).__init__()
+        super().__init__()
         self.kernel_size = kernel_size
         self.padding = kernel_size // 2
 

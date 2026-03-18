@@ -183,7 +183,7 @@ def build_model(config):
     # )
 
     # 改善梯度，使用凯明初始化
-    model.apply(init_weights)
+    model
     return model
 
 

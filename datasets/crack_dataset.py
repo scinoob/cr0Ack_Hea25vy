@@ -160,8 +160,8 @@ class CrackDataset(Dataset):
                 file_names = [line.strip() for line in f.readlines()]
 
             for file_name in file_names:
-                img_path = os.path.join(image_dir, file_name + '.jpg')
-                mask_path = os.path.join(mask_dir, file_name + '.png')
+                img_path = os.path.join(image_dir, file_name)
+                mask_path = os.path.join(mask_dir, file_name.strip('.jpg') + '.png')
                 image_paths.append(img_path)
                 mask_paths.append(mask_path)
 

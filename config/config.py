@@ -61,7 +61,7 @@ class ModelConfig:
     # LEDIM
     ledim_kernel_size: int = 7
 
-    # Decoder (4 stages: 256->128->64->32)
+    # Decoder (3 stages: 128->64->32)
     decoder_channels: List[int] = field(default_factory=lambda: [128, 64, 32])
 
 
@@ -70,18 +70,27 @@ class TrainConfig:
     """Training configuration"""
     # Training
     epochs: int = 200
-    batch_size: int = 8
-    num_workers: int = 4
+    batch_size: int = 16
+    num_workers: int = 0
 
     # Optimizer
     optimizer: str = 'AdamW'
-    lr: float = 1e-4
-    weight_decay: float = 1e-4
+    # lr: float = 5e-4
+    lr: float = 0.001
+    betas = (0.9,0.999)
+    eps:float = 1e-8
+    weight_decay: float = 1e-2
+    # weight_decay: float = 1e-4
 
     # Scheduler
     scheduler: str = 'cosine'
     warmup_epochs: int = 10
     min_lr: float = 1e-6
+
+    scheduler = 'CosineAnnealingLR'
+    T_max:int = 50
+    eta_min:float = 1e-5
+    last_epoch:int = -1
 
     # Loss weights
     lambda_main: float = 1.0

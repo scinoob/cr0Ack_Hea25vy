@@ -438,7 +438,7 @@ def main():
                         help='Batch size')
     parser.add_argument('--epochs', type=int, default=200,
                         help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', type=float, default=5e-4,
                         help='Learning rate')
     # ============================================================================
     # 改动日期: 2026-03-14
@@ -458,7 +458,7 @@ def main():
                         help='Device to train on')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
-    parser.add_argument('--num_workers', type=int, default=4,
+    parser.add_argument('--num_workers', type=int, default=0,
                         help='Number of data loading workers')
     args = parser.parse_args()
 
@@ -564,18 +564,34 @@ def main():
     logger.info(f'Trainable parameters: {trainable_params:,}')
 
     # Create optimizer
-    optimizer = get_optimizer(model, config.train)
+    # optimizer = get_optimizer(model, config.train)
+
+    optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=args.lr,
+            betas=(0.9,0.999),
+            eps=1e-8,
+            weight_decay=1e-2,
+            amsgrad=False
+        )
     logger.info(f'Optimizer: {config.train.optimizer}, LR: {config.train.lr}')
 
     # Create scheduler
-    scheduler = LRScheduler(
-        optimizer,
-        scheduler_type=config.train.scheduler,
-        warmup_epochs=config.train.warmup_epochs,
-        total_epochs=config.train.epochs,
-        base_lr=config.train.lr,
-        min_lr=config.train.min_lr
-    )
+    # scheduler = LRScheduler(
+    #     optimizer,
+    #     scheduler_type=config.train.scheduler,
+    #     warmup_epochs=config.train.warmup_epochs,
+    #     total_epochs=config.train.epochs,
+    #     base_lr=config.train.lr,
+    #     min_lr=config.train.min_lr
+    # )
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=50,
+            eta_min=1e-5,
+            last_epoch=-1
+        )
 
     # Create criterion
     criterion = CombinedLoss(
@@ -615,16 +631,17 @@ def main():
     for epoch in range(start_epoch, config.train.epochs):
         logger.info(f'\n{"=" * 60}')
         logger.info(f'Epoch {epoch + 1}/{config.train.epochs}')
-        logger.info(f'Learning rate: {scheduler.get_lr():.6f}')
+        # logger.info(f'Learning rate: {scheduler.get_lr():.6f}')
+        logger.info(f'Learning rate:{scheduler.get_last_lr()[0]:.6f}')
         logger.info(f'{"=" * 60}')
 
         # Train
-        train_loss, train_metrics = train_one_epoch(
+        _, train_metrics = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch + 1, logger, writer
         )
 
         # Validate
-        val_loss, val_metrics = validate(
+        _, val_metrics = validate(
             model, val_loader, criterion, device, epoch + 1, logger, writer
         )
         # val_loss, val_metrics = validate_with_dyn_threshold(
@@ -632,7 +649,8 @@ def main():
         # )
 
         # Update learning rate
-        scheduler.step(epoch + 1)
+        # scheduler.step(epoch + 1)
+        scheduler.step()
 
         # ============================================================================
         # 改动日期: 2026-03-14
