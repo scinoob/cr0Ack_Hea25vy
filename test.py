@@ -186,7 +186,7 @@ def main():
                         help='Dataset type')
     parser.add_argument('--data_root', type=str, default='./data/crack500',
                         help='Root directory of dataset')
-    parser.add_argument('--checkpoint_path', type=str, required=True,
+    parser.add_argument('--checkpoint', type=str, required=True,
                         help='Path to model checkpoint')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='Batch size')
@@ -231,8 +231,8 @@ def main():
     model = model.to(device)
     
     # Load checkpoint
-    logger.info(f'Loading checkpoint: {args.checkpoint_path}')
-    epoch, best_metric = load_checkpoint(args.checkpoint_path, model, device=device)
+    logger.info(f'Loading checkpoint: {args.checkpoint}')
+    epoch, best_metric = load_checkpoint(args.checkpoint, model, device=device)
     logger.info(f'Loaded checkpoint from epoch {epoch}, best metric: {best_metric:.4f}')
     
     # Single image inference
@@ -262,7 +262,7 @@ def main():
         
         # Visualize
         if args.visualize:
-            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            _, axes = plt.subplots(1, 3, figsize=(15, 5))
             
             # Original image
             img = Image.open(args.single_image).convert('RGB')

@@ -9,11 +9,6 @@ import time
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-# ============================================================================
-# 改动日期: 2026-03-14
-# 改动作者: @kimi
-# 改动说明: 引入 datetime 模块用于生成日期时间格式的目录名
-# ============================================================================
 from datetime import datetime
 
 # Add project root to path
@@ -25,7 +20,7 @@ from datasets import get_dataloader
 from utils import (
     SegmentationMetrics, CombinedLoss, set_seed, setup_logger,
     AverageMeter, LRScheduler, save_checkpoint, load_checkpoint,
-    get_optimizer, count_parameters, format_time, get_metrics_table, get_current_time
+    get_optimizer, count_parameters, format_time, get_metrics_table
 )
 
 # ============================================================================
@@ -65,31 +60,25 @@ def register_gradient_hooks(model):
                 grad = grad_output[0]
                 if grad is not None:
                     # 计算梯度统计信息
-                    # grad_mean = grad.abs().mean().item()
-                    # grad_max = grad.abs().max().item()
-                    # grad_std = grad.std().item()
                     grad_norm = grad.norm(2).item()
 
                     if name not in gradient_stats:
                         gradient_stats[name] = {'mean': [], 'max': [], 'std': [], 'norm': []}
 
-                    # gradient_stats[name]['mean'].append(grad_mean)
-                    # gradient_stats[name]['max'].append(grad_max)
-                    # gradient_stats[name]['std'].append(grad_std)
                     gradient_stats[name]['norm'].append(grad_norm)
 
         return hook_fn
 
-    # 注册 CNN branch1-4 的梯度钩子 (监控 blocks 的输出梯度)
-    for i in range(4):
+    # 注册 CNN branch1-3 的梯度钩子 (监控 blocks 的输出梯度)
+    for i in range(3):
         stage = model.cnn_branch.stages[i]
         # 在 CNNStage 的 blocks 上注册钩子
         name = f'CNN_Branch_{i + 1}'
         handle = stage.blocks.register_full_backward_hook(make_hook(name))
         gradient_hooks.append(handle)
 
-    # 注册 MiT Block1-4 的梯度钩子 (监控每个 stage 的 blocks)
-    for i in range(4):
+    # 注册 MiT Block1-3 的梯度钩子 (监控每个 stage 的 blocks)
+    for i in range(3):
         stage = model.mit_branch.stages[i]
         # 在 MiTStage 的 blocks ModuleList 上注册钩子
         name = f'MiT_Block_{i + 1}'
@@ -98,7 +87,6 @@ def register_gradient_hooks(model):
 
     # 注册 Decoder DSAM 的梯度钩子
     decoder_dsams = [
-        ('Decoder_DSAM_4', model.decoder.decoder4.dsam),
         ('Decoder_DSAM_3', model.decoder.decoder3.dsam),
         ('Decoder_DSAM_2', model.decoder.decoder2.dsam),
         ('Decoder_DSAM_1', model.decoder.decoder1.dsam),
@@ -126,14 +114,8 @@ def log_gradient_stats(writer, epoch):
     # 对每个模块记录平均梯度统计
     for name, stats in gradient_stats.items():
         if len(stats['norm']) > 0:
-            # avg_mean = sum(stats['mean']) / len(stats['mean'])
-            # avg_max = sum(stats['max']) / len(stats['max'])
-            # avg_std = sum(stats['std']) / len(stats['std'])
             avg_norm = sum(stats['norm']) / len(stats['norm'])
 
-            # writer.add_scalar(f'Gradient/{name}/mean', avg_mean, epoch)
-            # writer.add_scalar(f'Gradient/{name}/max', avg_max, epoch)
-            # writer.add_scalar(f'Gradient/{name}/std', avg_std, epoch)
             writer.add_scalar(f'Gradient/{name}/norm', avg_norm, epoch)
 
     # 清空统计信息，为下一个周期做准备
@@ -188,14 +170,11 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logg
         'CNN_Branch_1': 0.0,
         'CNN_Branch_2': 0.0,
         'CNN_Branch_3': 0.0,
-        'CNN_Branch_4': 0.0,
 
         'MiT_Branch_1': 0.0,
         'MiT_Branch_2': 0.0,
         'MiT_Branch_3': 0.0,
-        'MiT_Branch_4': 0.0,
 
-        'Decoder_DSAM_4': 0.0,
         'Decoder_DSAM_3': 0.0,
         'Decoder_DSAM_2': 0.0,
         'Decoder_DSAM_1': 0.0,
@@ -225,17 +204,14 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logg
         clipped_grad_norms['CNN_Branch_1'] += get_module_grad_norm(model.cnn_branch.stages[0].blocks)
         clipped_grad_norms['CNN_Branch_2'] += get_module_grad_norm(model.cnn_branch.stages[1].blocks)
         clipped_grad_norms['CNN_Branch_3'] += get_module_grad_norm(model.cnn_branch.stages[2].blocks)
-        clipped_grad_norms['CNN_Branch_4'] += get_module_grad_norm(model.cnn_branch.stages[3].blocks)
 
         clipped_grad_norms['MiT_Branch_1'] += get_module_grad_norm(model.mit_branch.stages[0].blocks)
         clipped_grad_norms['MiT_Branch_2'] += get_module_grad_norm(model.mit_branch.stages[1].blocks)
         clipped_grad_norms['MiT_Branch_3'] += get_module_grad_norm(model.mit_branch.stages[2].blocks)
-        clipped_grad_norms['MiT_Branch_4'] += get_module_grad_norm(model.mit_branch.stages[3].blocks)
 
         clipped_grad_norms['Decoder_DSAM_1'] += get_module_grad_norm(model.decoder.decoder1.dsam)
         clipped_grad_norms['Decoder_DSAM_2'] += get_module_grad_norm(model.decoder.decoder2.dsam)
         clipped_grad_norms['Decoder_DSAM_3'] += get_module_grad_norm(model.decoder.decoder3.dsam)
-        clipped_grad_norms['Decoder_DSAM_4'] += get_module_grad_norm(model.decoder.decoder4.dsam)
 
         optimizer.step()
 
@@ -293,14 +269,11 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logg
         writer.add_scalar('Clipped_Grad/CNN_Branch_1', clipped_grad_norms['CNN_Branch_1'] / len(dataloader), epoch)
         writer.add_scalar('Clipped_Grad/CNN_Branch_2', clipped_grad_norms['CNN_Branch_2'] / len(dataloader), epoch)
         writer.add_scalar('Clipped_Grad/CNN_Branch_3', clipped_grad_norms['CNN_Branch_3'] / len(dataloader), epoch)
-        writer.add_scalar('Clipped_Grad/CNN_Branch_4', clipped_grad_norms['CNN_Branch_4'] / len(dataloader), epoch)
 
         writer.add_scalar('Clipped_Grad/MiT_Branch_1', clipped_grad_norms['MiT_Branch_1'] / len(dataloader), epoch)
         writer.add_scalar('Clipped_Grad/MiT_Branch_2', clipped_grad_norms['MiT_Branch_2'] / len(dataloader), epoch)
         writer.add_scalar('Clipped_Grad/MiT_Branch_3', clipped_grad_norms['MiT_Branch_3'] / len(dataloader), epoch)
-        writer.add_scalar('Clipped_Grad/MiT_Branch_4', clipped_grad_norms['MiT_Branch_4'] / len(dataloader), epoch)
 
-        writer.add_scalar('Clipped_Grad/Decoder_DSAM_4', clipped_grad_norms['Decoder_DSAM_4'] / len(dataloader), epoch)
         writer.add_scalar('Clipped_Grad/Decoder_DSAM_3', clipped_grad_norms['Decoder_DSAM_3'] / len(dataloader), epoch)
         writer.add_scalar('Clipped_Grad/Decoder_DSAM_2', clipped_grad_norms['Decoder_DSAM_2'] / len(dataloader), epoch)
         writer.add_scalar('Clipped_Grad/Decoder_DSAM_1', clipped_grad_norms['Decoder_DSAM_1'] / len(dataloader), epoch)
@@ -651,12 +624,12 @@ def main():
         )
 
         # Validate
-        # val_loss, val_metrics = validate(
-        #     model, val_loader, criterion, device, epoch + 1, logger, writer
-        # )
-        val_loss, val_metrics = validate_with_dyn_threshold(
+        val_loss, val_metrics = validate(
             model, val_loader, criterion, device, epoch + 1, logger, writer
         )
+        # val_loss, val_metrics = validate_with_dyn_threshold(
+        #     model, val_loader, criterion, device, epoch + 1, logger, writer
+        # )
 
         # Update learning rate
         scheduler.step(epoch + 1)

@@ -385,7 +385,7 @@ class MiTStage(nn.Module):
     """
 
     def __init__(self, in_channels, out_channels, depth, num_heads, mlp_ratio, sr_ratio, drop=0., drop_path=0.):
-        super(MiTStage, self).__init__()
+        super().__init__()
 
         # Patch embedding
         self.patch_embed = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1, bias=False)

@@ -10,7 +10,7 @@ class DataConfig:
     """Dataset configuration"""
     # Dataset type: 'crack500', 'cfd', 'mcd'
     dataset_type: str = 'cfd'
-    
+
     # Data paths
     data_root: str = '/mnt/d/dev/data'
     train_images: str = 'train/image'
@@ -19,15 +19,15 @@ class DataConfig:
     val_masks: str = 'validation/mask'
     test_images: str = 'test/image'
     test_masks: str = 'test/mask'
-    
+
     # For MCD dataset
     train_list: str = 'train_slices.txt'
     val_list: str = 'val_slices.txt'
     test_list: str = 'test_slices.txt'
-    
+
     # Image size
     input_size: int = 512
-    
+
     # Data augmentation
     use_augmentation: bool = True
     horizontal_flip: bool = True
@@ -42,27 +42,27 @@ class ModelConfig:
     # Stem
     stem_in_channels: int = 3
     stem_out_channels: int = 64
-    
+
     # MiT Branch
-    mit_embed_dims: List[int] = field(default_factory=lambda: [64, 128, 256, 512])
-    mit_num_heads: List[int] = field(default_factory=lambda: [1, 2, 4, 8])
-    mit_sr_ratios: List[int] = field(default_factory=lambda: [8, 4, 2, 1])
-    mit_mlp_ratios: List[int] = field(default_factory=lambda: [4, 4, 4, 4])
-    mit_depths: List[int] = field(default_factory=lambda: [2, 2, 2, 2])
+    mit_embed_dims: List[int] = field(default_factory=lambda: [64, 128, 256])
+    mit_num_heads: List[int] = field(default_factory=lambda: [1, 2, 4])
+    mit_sr_ratios: List[int] = field(default_factory=lambda: [8, 4, 2])
+    mit_mlp_ratios: List[int] = field(default_factory=lambda: [4, 4, 4])
+    mit_depths: List[int] = field(default_factory=lambda: [2, 2, 2])
     mit_drop_rate: float = 0.0
     mit_drop_path_rate: float = 0.1
-    
+
     # CNN Branch
-    cnn_channels: List[int] = field(default_factory=lambda: [64, 128, 256, 512])
-    
+    cnn_channels: List[int] = field(default_factory=lambda: [64, 128, 256])
+
     # DSAM
     dsam_kernel_size: int = 7
-    
+
     # LEDIM
     ledim_kernel_size: int = 7
-    
+
     # Decoder (4 stages: 256->128->64->32)
-    decoder_channels: List[int] = field(default_factory=lambda: [256, 128, 64, 32])
+    decoder_channels: List[int] = field(default_factory=lambda: [128, 64, 32])
 
 
 @dataclass
@@ -72,34 +72,34 @@ class TrainConfig:
     epochs: int = 200
     batch_size: int = 8
     num_workers: int = 4
-    
+
     # Optimizer
     optimizer: str = 'AdamW'
     lr: float = 1e-4
     weight_decay: float = 1e-4
-    
+
     # Scheduler
     scheduler: str = 'cosine'
     warmup_epochs: int = 10
     min_lr: float = 1e-6
-    
+
     # Loss weights
     lambda_main: float = 1.0
     lambda_boundary: float = 0.5
     lambda_aux: float = 0.4
-    
+
     # Checkpoint
     checkpoint_dir: str = './checkpoints'
     save_interval: int = 10
-    
+
     # Logging
     log_interval: int = 10
     use_tensorboard: bool = True
     log_dir: str = './logs'
-    
+
     # Device
     device: str = 'cuda'
-    
+
     # Resume training
     resume: str = ''
 
@@ -110,17 +110,17 @@ class TestConfig:
     # Test
     batch_size: int = 1
     num_workers: int = 4
-    
+
     # Checkpoint
     checkpoint_path: str = ''
-    
+
     # Output
     save_predictions: bool = True
     output_dir: str = './results'
-    
+
     # Visualization
     visualize: bool = True
-    
+
     # Device
     device: str = 'cuda'
 
@@ -132,7 +132,7 @@ class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     test: TestConfig = field(default_factory=TestConfig)
-    
+
     # Random seed
     seed: int = 42
 
@@ -168,5 +168,5 @@ def update_config_from_args(config: Config, args):
         config.test.device = args.device
     if hasattr(args, 'seed') and args.seed is not None:
         config.seed = args.seed
-    
+
     return config

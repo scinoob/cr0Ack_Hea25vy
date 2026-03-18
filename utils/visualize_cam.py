@@ -100,9 +100,10 @@ class SemanticSegmentationGradCAM:
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default="./checkpoints/model.pth")
-    parser.add_argument('--image', type=str, default="./images/test.jpg")
+    parser.add_argument('--image', type=str, default="/mnt/d/dev/data/CFD/test/image/035.jpg")
     parser.add_argument('--input_size', type=int, default=512)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--save_path',type=str,default='full_pipeline_grad_cam.png')
     return parser.parse_args()
 
 
@@ -136,14 +137,14 @@ def main():
         'CNN_Stage_1': model.cnn_branch.stages[0].blocks[-1],
         'CNN_Stage_2': model.cnn_branch.stages[1].blocks[-1],
         'CNN_Stage_3': model.cnn_branch.stages[2].blocks[-1],
-        'CNN_Stage_4': model.cnn_branch.stages[3].blocks[-1],
+        # 'CNN_Stage_4': model.cnn_branch.stages[3].blocks[-1],
 
         'MiT_Stage_1': model.mit_branch.stages[0].blocks[-1],
         'MiT_Stage_2': model.mit_branch.stages[1].blocks[-1],
         'MiT_Stage_3': model.mit_branch.stages[2].blocks[-1],
-        'MiT_Stage_4': model.mit_branch.stages[3].blocks[-1],
+        # 'MiT_Stage_4': model.mit_branch.stages[3].blocks[-1],
 
-        'Decoder_DSAM_4': model.decoder.decoder4.dsam,
+        # 'Decoder_DSAM_4': model.decoder.decoder4.dsam,
         'Decoder_DSAM_3': model.decoder.decoder3.dsam,
         'Decoder_DSAM_2': model.decoder.decoder2.dsam,
         'Decoder_DSAM_1': model.decoder.decoder1.dsam,
@@ -179,7 +180,7 @@ def main():
         axes[row, col].axis('off')
 
     plt.tight_layout()
-    save_path = 'full_pipeline_grad_cam.png'
+    save_path = args.save_path
     plt.savefig(save_path, dpi=300)
     print(f"\n✅ 全链路热力图分析已生成！请查看: {save_path}")
 

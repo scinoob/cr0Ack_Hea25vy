@@ -3,7 +3,6 @@ Crack Segmentation Dataset
 支持三种数据集格式：crack500、CFD、MCD
 """
 import os
-import sys
 
 import cv2
 import torch
@@ -34,6 +33,7 @@ class CrackDataset(Dataset):
                  vertical_flip=True,
                  rotation=True,
                  brightness_jitter=0.1,
+                 contrast_jitter=0.2,
                  use_clahe=False  # 新增参数控制是否使用 CLAHE
                  ):
         """
@@ -57,6 +57,7 @@ class CrackDataset(Dataset):
         self.vertical_flip = vertical_flip
         self.rotation = rotation
         self.brightness_jitter = brightness_jitter
+        self.contrast_jitter = contrast_jitter
         self.use_clahe = use_clahe and (split == 'train')  # 建议仅在训练时使用，或者全部使用
         # 初始化 CLAHE 算法实例
         self.clahe = None
@@ -75,7 +76,13 @@ class CrackDataset(Dataset):
         ])
 
         self.mask_transform = transforms.Compose([
-            transforms.Resize((input_size, input_size), interpolation=Image.NEAREST),
+            # transforms.Resize((input_size, input_size), interpolation=Image.NEAREST),
+            # 根据pytorch官网介绍，InterpolationMode.NEAREST_EXACT(torchvision)
+            # 或mode='nearest-exact'(torch.nn.functional.interpolate)
+            # 与scikit-learn/Pillow的最近邻插值算法吻合
+            # 而mode='nearest' 为对OpenCV的有漏洞算法`INTER_NEAREST`的兼容
+            # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.interpolate.html
+            transforms.Resize((input_size, input_size), interpolation=TF.InterpolationMode.NEAREST_EXACT),
             transforms.ToTensor()
         ])
 
@@ -183,6 +190,14 @@ class CrackDataset(Dataset):
             brightness_factor = 1.0 + torch.empty(1).uniform_(-self.brightness_jitter, self.brightness_jitter).item()
             image = TF.adjust_brightness(image, brightness_factor)
 
+        # 随机对比度增强
+        if self.contrast_jitter > 0 and torch.rand(1) > 0.5:
+            contrast_factor = 1.0 + torch.empty(1).uniform_(-self.contrast_jitter, self.contrast_jitter).item()
+            image = TF.adjust_contrast(image, contrast_factor=contrast_factor)
+
+        # gamma变换，副作用
+        # image = TF.adjust_gamma(image, 1.5)
+
         return image, mask
 
     # 新增 CLAHE 处理函数
@@ -257,7 +272,9 @@ def get_dataloader(config, split='train'):
         horizontal_flip=config.horizontal_flip,
         vertical_flip=config.vertical_flip,
         rotation=config.rotation,
-        brightness_jitter=config.brightness_jitter
+        # contrast_jitter=config.contrast_jitter,
+        brightness_jitter=config.brightness_jitter,
+        # use_clahe=config.use_clahe,
     )
 
     batch_size = config.batch_size if hasattr(config, 'batch_size') else 8
@@ -288,7 +305,7 @@ if __name__ == "__main__":
         horizontal_flip=True,
         vertical_flip=True,
         rotation=True,
-        brightness_jitter=0.1
+        brightness_jitter=0.5
     )
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     single = next(iter(dataloader))

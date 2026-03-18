@@ -85,6 +85,35 @@ class BCEDiceLoss(nn.Module):
         return self.bce_weight * bce_loss + self.dice_weight * dice_loss
 
 
+class BCEDiceLossWithRelaxation(nn.Module):
+    """
+    带有标签宽容度 (Label Relaxation) 的 BCEDiceLoss
+    专门解决极细目标标注过于苛刻导致的断裂(欠分割)问题
+    """
+
+    def __init__(self, bce_weight=1.0, dice_weight=1.0):
+        super().__init__()
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
+        self.bce = nn.BCELoss()
+
+    def forward(self, pred, target):
+        # 【核心魔法】：使用 3x3 MaxPool 对 Target 进行 1 像素的膨胀
+        # 这样 Ground Truth 会稍微变粗一点点，给网络 1 像素的预测容错率
+        target_relaxed = F.max_pool2d(target, kernel_size=3, stride=1, padding=1)
+
+        # BCE 损失：使用膨胀后的宽容标签，鼓励网络放心大胆地连通线条
+        bce_loss = self.bce(pred, target_relaxed)
+
+        # Dice 损失：使用膨胀后的标签，平滑全局结构
+        smooth = 1.0
+        intersection = (pred * target_relaxed).sum(dim=(2, 3))
+        union = pred.sum(dim=(2, 3)) + target_relaxed.sum(dim=(2, 3))
+        dice_loss = 1 - ((2. * intersection + smooth) / (union + smooth)).mean()
+
+        return self.bce_weight * bce_loss + self.dice_weight * dice_loss
+
+
 class BoundaryLoss(nn.Module):
     """
     Boundary Loss
@@ -156,10 +185,11 @@ class FocalLoss(nn.Module):
     Formula: FL = -α_t * (1 - p_t)^γ * log(p_t)
     """
 
-    def __init__(self, alpha=0.25, gamma=2.0):
+    def __init__(self, alpha=0.75, gamma=2.0, reduction='mean'):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
+        self.reduction = reduction
         self.bce = nn.BCELoss(reduction='none')
 
     def forward(self, pred, target):
@@ -172,13 +202,17 @@ class FocalLoss(nn.Module):
         """
         bce_loss = self.bce(pred, target)
 
-        pt = torch.where(target == 1, pred, 1 - pred)
+        # pt = torch.where(target == 1, pred, 1 - pred)
+        pt = torch.exp(-bce_loss)  # 获取置信度
 
         focal_weight = self.alpha * (1 - pt) ** self.gamma
 
-        loss = focal_weight * bce_loss
+        focal_loss = focal_weight * bce_loss
 
-        return loss.mean()
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+
+        return focal_loss.sum()
 
 
 class TverskyLoss(nn.Module):
@@ -223,28 +257,42 @@ class CombinedLoss(nn.Module):
         self.lambda_boundary = lambda_boundary
         self.lambda_aux = lambda_aux
 
-        # 更换损失函数为TverskyLoss
-        # Main loss
+        # 更换损失函数为FocalLoss
+        # Focal Loss 的初衷是强迫网络关注“困难样本”。但在裂缝分割中，什么是困难样本？
+        # 是裂缝与背景的过渡边缘。由于 CFD 数据集的标注是一条极细的绝对边界，而真实的裂缝边缘是渐变的。
+        # Focal Loss 会给这些处于模棱两可的渐变像素施加巨大的惩罚
+        # （因为网络在这些地方预测概率徘徊在 0.3~0.5）。为了降低这个极端的 Loss，
+        # 网络干脆选择“和稀泥”——在所有有轻微纹理变化的地方都预测一个中等概率（产生雾状阴影）。
+        # 它直接破坏了网络的自信心。-> 导致网络摆烂了 >_->
+        # self.main_loss = FocalLoss()
+        # Main loss BCEDiceLoss
         self.main_loss = BCEDiceLoss(bce_weight=bce_weight, dice_weight=dice_weight)
+        # 尝试使用具有标签宽容度的bceDiceLoss，会导致precision上不去
+        # self.main_loss = BCEDiceLossWithRelaxation(bce_weight=bce_weight, dice_weight=dice_weight)
 
         # Boundary loss
-        self.boundary_loss = BoundaryLoss()
+        # self.boundary_loss = BoundaryLoss()
 
+        # 更换损失函数为TverskyLoss
         # Auxiliary loss
-        self.aux_loss = TverskyLoss(alpha=0.8, beta=0.2, smooth=1)
+        # self.aux_loss = TverskyLoss(alpha=0.8, beta=0.2, smooth=1)
+        # 等会儿尝试
+        self.aux_loss = BCEDiceLoss(bce_weight=bce_weight, dice_weight=dice_weight)
 
     def forward(self, pred_main, pred_boundary, pred_aux, target):
         # Main loss
         loss_main = self.main_loss(pred_main, target)
 
-        pred_boundary_up = F.interpolate(
-            pred_boundary,
-            size=target.shape[2:],
-            mode='bilinear',
-            align_corners=False
-        )
+        # pred_boundary_up = F.interpolate(
+        #     pred_boundary,
+        #     size=target.shape[2:],
+        #     mode='bilinear',
+        #     align_corners=False
+        # )
         # 直接使用原尺寸 target 计算高清边缘 Loss
-        loss_boundary = self.boundary_loss(pred_boundary_up, target)
+        # loss_boundary = self.boundary_loss(pred_boundary_up, target)
+        # 保持边界损失关闭 (因为前面已经验证 Sobel 对单像素不友好)
+        loss_boundary = torch.tensor(0., device=pred_main.device)
 
         pred_aux_up = F.interpolate(
             pred_aux,
@@ -255,13 +303,14 @@ class CombinedLoss(nn.Module):
         loss_aux = self.aux_loss(pred_aux_up, target)
 
         # Total loss
-        total_loss = loss_main + self.lambda_boundary * loss_boundary + self.lambda_aux * loss_aux
+        # total_loss = loss_main + self.lambda_boundary * loss_boundary + self.lambda_aux * loss_aux
+        total_loss = loss_main + self.lambda_aux * loss_aux
 
         # Loss dictionary
         loss_dict = {
             'total': total_loss.item(),
             'main': loss_main.item(),
-            'boundary': loss_boundary.item(),
+            'boundary': 0.,
             'aux': loss_aux.item()
         }
 
